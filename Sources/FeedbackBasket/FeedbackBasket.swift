@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Security
 import UIKit
 
@@ -64,10 +65,12 @@ public enum FeedbackBasketError: LocalizedError {
 /// The main entry point for configuring and submitting FeedbackBasket feedback.
 public enum FeedbackBasket {
     /// The current SDK version.
-    public nonisolated static let sdkVersion = "0.2.0"
+    public nonisolated static let sdkVersion = "0.3.0"
 
     private static var client: FeedbackBasketClient?
+    private static var foregroundObserver: NSObjectProtocol?
     static var configuredUser: FeedbackBasketUser?
+    static let replyState = FeedbackBasketReplyState()
 
     /// Configures the SDK and schedules a non-blocking connection heartbeat.
     ///
@@ -88,7 +91,21 @@ public enum FeedbackBasket {
         )
         client = newClient
         configuredUser = user
-        Task { await newClient.sendHeartbeatIfNeeded() }
+        if foregroundObserver == nil {
+            foregroundObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                Task { @MainActor in
+                    _ = await FeedbackBasket.loadReplies()
+                }
+            }
+        }
+        Task {
+            await newClient.sendHeartbeatIfNeeded()
+            _ = await loadReplies()
+        }
     }
 
     /// Submits feedback using the active configuration.
@@ -108,19 +125,44 @@ public enum FeedbackBasket {
     }
 
     static func loadReplies() async -> FeedbackReplyInbox {
-        guard let client else { return .empty }
-        return await client.loadReplies()
+        guard let client else {
+            replyState.unreadCount = 0
+            return .empty
+        }
+        let inbox = await client.loadReplies()
+        replyState.unreadCount = inbox.unreadCount
+        return inbox
     }
 
-    static func markRepliesSeen(in threads: [FeedbackThreadCredential]) async {
+    static func markRepliesSeen(
+        in threads: [FeedbackThreadCredential],
+        unreadCount: Int
+    ) async {
         guard let client else { return }
+        replyState.unreadCount = max(0, replyState.unreadCount - unreadCount)
         await client.markRepliesSeen(in: threads)
+    }
+
+    static func sendReply(
+        _ content: String,
+        in conversation: FeedbackConversation
+    ) async throws -> FeedbackBasketMessage {
+        guard let client else { throw FeedbackBasketError.notConfigured }
+        return try await client.sendReply(
+            content: content,
+            credential: conversation.credential
+        )
     }
 
 #if DEBUG
     static func resetForTesting() {
         client = nil
         configuredUser = nil
+        replyState.unreadCount = 0
+        if let foregroundObserver {
+            NotificationCenter.default.removeObserver(foregroundObserver)
+            self.foregroundObserver = nil
+        }
     }
 #endif
 }
@@ -203,8 +245,7 @@ actor FeedbackBasketClient {
             return .empty
         }
 
-        var replies: [FeedbackBasketReply] = []
-        var threadsToAcknowledge: [FeedbackThreadCredential] = []
+        var conversations: [FeedbackConversation] = []
         for credential in credentials {
             do {
                 var request = URLRequest(
@@ -221,10 +262,25 @@ actor FeedbackBasketClient {
                 )
                 let data = try await perform(request)
                 let response = try JSONDecoder().decode(FeedbackMessagesResponse.self, from: data)
-                let threadReplies = response.messages.compactMap(\.reply)
-                if !threadReplies.isEmpty {
-                    replies.append(contentsOf: threadReplies)
-                    threadsToAcknowledge.append(credential)
+                let messages = response.messages.compactMap(\.message)
+                if !messages.isEmpty {
+                    let lastSeenAt = response.lastSeenAt.flatMap(
+                        FeedbackBasketDateParser.date(from:)
+                    )
+                    let unreadCount = messages.filter { message in
+                        guard message.sender == .owner else { return false }
+                        guard let lastSeenAt else { return true }
+                        return message.createdAt > lastSeenAt
+                    }.count
+                    conversations.append(
+                        FeedbackConversation(
+                            credential: credential,
+                            originalContent: response.feedback?.content,
+                            messages: messages,
+                            visitorRepliesEnabled: response.visitorRepliesEnabled ?? false,
+                            unreadCount: unreadCount
+                        )
+                    )
                 }
             } catch {
                 // Reply retrieval must never prevent the feedback form from opening.
@@ -232,9 +288,39 @@ actor FeedbackBasketClient {
         }
 
         return FeedbackReplyInbox(
-            replies: replies.sorted { $0.createdAt < $1.createdAt },
-            threadsToAcknowledge: threadsToAcknowledge
+            conversations: conversations.sorted {
+                ($0.messages.last?.createdAt ?? .distantPast) >
+                    ($1.messages.last?.createdAt ?? .distantPast)
+            }
         )
+    }
+
+    func sendReply(
+        content: String,
+        credential: FeedbackThreadCredential
+    ) async throws -> FeedbackBasketMessage {
+        var request = URLRequest(
+            url: endpoint(
+                pathComponents: [
+                    "api", "widget", "feedback", credential.feedbackId, "messages",
+                ]
+            )
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(
+            "Bearer \(credential.accessToken)",
+            forHTTPHeaderField: "Authorization"
+        )
+        request.httpBody = try JSONEncoder().encode(
+            VisitorReplyPayload(content: content)
+        )
+        let data = try await perform(request)
+        let response = try JSONDecoder().decode(VisitorReplyResponse.self, from: data)
+        guard let message = response.message.message else {
+            throw FeedbackBasketError.invalidResponse
+        }
+        return message
     }
 
     func markRepliesSeen(in threads: [FeedbackThreadCredential]) async {
@@ -338,29 +424,47 @@ private struct FeedbackSubmissionResponse: Decodable {
 
 private struct FeedbackMessagesResponse: Decodable {
     let messages: [FeedbackMessageResponse]
+    let feedback: FeedbackThreadResponse?
+    let lastSeenAt: String?
+    let visitorRepliesEnabled: Bool?
+}
+
+private struct FeedbackThreadResponse: Decodable {
+    let content: String
 }
 
 private struct FeedbackMessageResponse: Decodable {
     let id: String
-    let senderType: String
+    let senderType: String?
     let content: String
     let sentByName: String?
     let createdAt: String
 
-    var reply: FeedbackBasketReply? {
+    var message: FeedbackBasketMessage? {
         guard
-            senderType == "OWNER",
+            let sender = FeedbackBasketMessageSender(
+                rawValue: senderType ?? "OWNER"
+            ),
             let date = FeedbackBasketDateParser.date(from: createdAt)
         else {
             return nil
         }
-        return FeedbackBasketReply(
+        return FeedbackBasketMessage(
             id: id,
+            sender: sender,
             content: content,
             sentByName: sentByName,
             createdAt: date
         )
     }
+}
+
+private struct VisitorReplyPayload: Encodable {
+    let content: String
+}
+
+private struct VisitorReplyResponse: Decodable {
+    let message: FeedbackMessageResponse
 }
 
 private struct SeenPayload: Encodable {
@@ -381,6 +485,11 @@ private enum FeedbackBasketDateParser {
 
 private struct APIError: Decodable {
     let error: String
+}
+
+@MainActor
+final class FeedbackBasketReplyState: ObservableObject {
+    @Published var unreadCount = 0
 }
 
 @MainActor

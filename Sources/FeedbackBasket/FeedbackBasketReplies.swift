@@ -6,18 +6,37 @@ struct FeedbackThreadCredential: Codable, Equatable, Sendable {
     let accessToken: String
 }
 
-struct FeedbackBasketReply: Equatable, Identifiable, Sendable {
+enum FeedbackBasketMessageSender: String, Equatable, Sendable {
+    case owner = "OWNER"
+    case visitor = "VISITOR"
+}
+
+struct FeedbackBasketMessage: Equatable, Identifiable, Sendable {
     let id: String
+    let sender: FeedbackBasketMessageSender
     let content: String
     let sentByName: String?
     let createdAt: Date
 }
 
 struct FeedbackReplyInbox: Equatable, Sendable {
-    static let empty = FeedbackReplyInbox(replies: [], threadsToAcknowledge: [])
+    static let empty = FeedbackReplyInbox(conversations: [])
 
-    let replies: [FeedbackBasketReply]
-    let threadsToAcknowledge: [FeedbackThreadCredential]
+    let conversations: [FeedbackConversation]
+
+    var unreadCount: Int {
+        conversations.reduce(0) { $0 + $1.unreadCount }
+    }
+}
+
+struct FeedbackConversation: Equatable, Identifiable, Sendable {
+    var id: String { credential.feedbackId }
+
+    let credential: FeedbackThreadCredential
+    let originalContent: String?
+    let messages: [FeedbackBasketMessage]
+    let visitorRepliesEnabled: Bool
+    let unreadCount: Int
 }
 
 protocol FeedbackThreadStore: Sendable {
@@ -85,4 +104,3 @@ actor KeychainFeedbackThreadStore: FeedbackThreadStore {
 private enum KeychainThreadStoreError: Error {
     case unexpectedStatus(OSStatus)
 }
-

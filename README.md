@@ -6,7 +6,7 @@ FeedbackBasket dashboard used by your web projects.
 The SDK supports iOS 16 and later and includes:
 
 - A native SwiftUI feedback sheet
-- In-app team replies in the same feedback sheet
+- Unread team-reply badges and two-way conversations in the same feedback sheet
 - Programmatic feedback submission
 - Automatic app and device context
 - A lightweight connection heartbeat for dashboard verification
@@ -24,14 +24,14 @@ https://github.com/deifos/feedbackbasket-swift.git
 ```
 
 Add the `FeedbackBasket` product to the main iOS application target. Use version
-`0.2.0` or later for in-app team replies.
+`0.3.0` or later for two-way conversations.
 
 For a Swift package manifest, add:
 
 ```swift
 .package(
     url: "https://github.com/deifos/feedbackbasket-swift.git",
-    from: "0.2.0"
+    from: "0.3.0"
 )
 ```
 
@@ -108,18 +108,35 @@ struct SettingsView: View {
 The standard form includes an optional email field. A configured email is
 prefilled, but the user can clear it to submit without an email address.
 
-## Receive team replies
+## Continue feedback conversations
 
 No additional host-app code is required. After a dashboard user sends an
-in-app reply, the SDK shows it under **Team replies** the next time the native
-feedback sheet opens. Reply checks are non-blocking, so the form still opens
-normally when the device is offline or FeedbackBasket is temporarily
-unavailable.
+in-app reply, the SDK shows an unread badge on the view presenting the feedback
+sheet. The sheet groups the original feedback and later messages into one
+conversation. When follow-up replies are enabled in the FeedbackBasket mobile
+settings, the user can answer the team from that conversation without creating
+a second feedback submission.
+
+The unread badge is enabled by default. To keep conversations in the sheet but
+hide the badge on its presenting view:
+
+```swift
+.feedbackBasketSheet(
+    isPresented: $showingFeedback,
+    context: ["screen": "Settings"],
+    showsUnreadBadge: false
+)
+```
+
+Reply checks are non-blocking and run after configuration, when the app returns
+to the foreground, and when the sheet opens. The form still opens normally when
+the device is offline or FeedbackBasket is temporarily unavailable. This is an
+in-app unread indicator, not an APNs push notification while the app is closed.
 
 Each native submission receives a per-thread reply credential. The SDK stores
-that credential in the app Keychain, uses it only in authenticated reply
-requests, and marks replies seen after displaying them. Credentials are never
-placed in URLs or logs.
+that credential in the app Keychain, uses it only in authenticated conversation
+requests, and marks team messages seen after the conversation opens.
+Credentials are never placed in URLs or logs.
 
 ## Submit feedback programmatically
 
@@ -157,8 +174,8 @@ random Keychain-backed installation identifier. The last successful heartbeat
 time is stored in app-only `UserDefaults` to throttle connections.
 
 Per-submission reply credentials are stored in the app Keychain so the native
-sheet can retrieve and acknowledge team replies. They are not shared with the
-host app or stored in `UserDefaults`.
+sheet can retrieve, send, and acknowledge conversation messages. They are not
+shared with the host app or stored in `UserDefaults`.
 
 The package bundles `PrivacyInfo.xcprivacy` for its own behavior. Applications
 using the SDK remain responsible for reviewing their privacy policy, App Store

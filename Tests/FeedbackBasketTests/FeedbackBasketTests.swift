@@ -108,14 +108,14 @@ final class FeedbackBasketTests: XCTestCase {
         )
     }
 
-    func testReplyFetchUsesBearerAuthorizationAndDecodesOwnerMessages() async throws {
+    func testReplyFetchUsesBearerAuthorizationAndDecodesConversation() async throws {
         let store = MockThreadStore()
         try await store.save(
             FeedbackThreadCredential(feedbackId: "feedback-123", accessToken: "thread-token"),
             for: baseURL
         )
         let response = Data(
-            #"{"messages":[{"id":"message-1","senderType":"OWNER","content":"Thanks — this is fixed.","sentByName":"Vlad","createdAt":"2026-07-13T15:30:00.000Z"}],"lastSeenAt":null}"#.utf8
+            #"{"feedback":{"content":"Save is broken","createdAt":"2026-07-13T15:00:00.000Z"},"messages":[{"id":"message-1","content":"Can you share more detail?","sentByName":"Vlad","createdAt":"2026-07-13T15:30:00.000Z"},{"id":"message-2","senderType":"VISITOR","content":"It happens with PDFs.","sentByName":null,"createdAt":"2026-07-13T15:35:00.000Z"}],"lastSeenAt":null,"visitorRepliesEnabled":true}"#.utf8
         )
         let transport = MockTransport.success(data: response)
         let client = makeClient(transport: transport, threadStore: store)
@@ -129,10 +129,39 @@ final class FeedbackBasketTests: XCTestCase {
             "/api/widget/feedback/feedback-123/messages"
         )
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer thread-token")
-        XCTAssertEqual(inbox.replies.count, 1)
-        XCTAssertEqual(inbox.replies.first?.content, "Thanks — this is fixed.")
-        XCTAssertEqual(inbox.replies.first?.sentByName, "Vlad")
-        XCTAssertEqual(inbox.threadsToAcknowledge.count, 1)
+        XCTAssertEqual(inbox.conversations.count, 1)
+        XCTAssertEqual(inbox.conversations.first?.originalContent, "Save is broken")
+        XCTAssertEqual(inbox.conversations.first?.messages.count, 2)
+        XCTAssertEqual(inbox.conversations.first?.messages.first?.sender, .owner)
+        XCTAssertEqual(inbox.conversations.first?.messages.last?.sender, .visitor)
+        XCTAssertEqual(inbox.conversations.first?.visitorRepliesEnabled, true)
+        XCTAssertEqual(inbox.unreadCount, 1)
+    }
+
+    func testVisitorReplyPostsContentWithBearerAuthorization() async throws {
+        let response = Data(
+            #"{"message":{"id":"message-2","senderType":"VISITOR","content":"It happens with PDFs.","sentByName":null,"createdAt":"2026-07-13T15:35:00.000Z"}}"#.utf8
+        )
+        let transport = MockTransport.success(data: response)
+        let client = makeClient(transport: transport)
+        let credential = FeedbackThreadCredential(
+            feedbackId: "feedback-123",
+            accessToken: "thread-token"
+        )
+
+        let message = try await client.sendReply(
+            content: "It happens with PDFs.",
+            credential: credential
+        )
+
+        let request = try await transport.lastRequest()
+        let body = try await transport.lastJSON()
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/widget/feedback/feedback-123/messages")
+        XCTAssertNil(request.url?.query)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer thread-token")
+        XCTAssertEqual(body["content"] as? String, "It happens with PDFs.")
+        XCTAssertEqual(message.sender, .visitor)
     }
 
     func testSeenAcknowledgementPostsTokenInJSONBody() async throws {
