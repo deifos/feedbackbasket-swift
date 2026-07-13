@@ -64,7 +64,7 @@ public enum FeedbackBasketError: LocalizedError {
 /// The main entry point for configuring and submitting FeedbackBasket feedback.
 public enum FeedbackBasket {
     /// The current SDK version.
-    public nonisolated static let sdkVersion = "0.1.0"
+    public nonisolated static let sdkVersion = "0.2.0"
 
     private static var client: FeedbackBasketClient?
     static var configuredUser: FeedbackBasketUser?
@@ -107,6 +107,16 @@ public enum FeedbackBasket {
         )
     }
 
+    static func loadReplies() async -> FeedbackReplyInbox {
+        guard let client else { return .empty }
+        return await client.loadReplies()
+    }
+
+    static func markRepliesSeen(in threads: [FeedbackThreadCredential]) async {
+        guard let client else { return }
+        await client.markRepliesSeen(in: threads)
+    }
+
 #if DEBUG
     static func resetForTesting() {
         client = nil
@@ -127,6 +137,7 @@ actor FeedbackBasketClient {
     private let user: FeedbackBasketUser?
     private let defaultContext: [String: String]
     private let transport: any FeedbackBasketTransport
+    private let threadStore: any FeedbackThreadStore
     private let heartbeatDefaults: UserDefaults
     private let installationIdentifier: @Sendable () -> String
     private let now: @Sendable () -> Date
@@ -137,6 +148,7 @@ actor FeedbackBasketClient {
         user: FeedbackBasketUser?,
         defaultContext: [String: String],
         transport: any FeedbackBasketTransport = URLSession.shared,
+        threadStore: any FeedbackThreadStore = KeychainFeedbackThreadStore(),
         heartbeatDefaults: UserDefaults = .standard,
         installationIdentifier: @escaping @Sendable () -> String = { InstallationIdentifier.value },
         now: @escaping @Sendable () -> Date = { Date() }
@@ -146,6 +158,7 @@ actor FeedbackBasketClient {
         self.user = user
         self.defaultContext = defaultContext
         self.transport = transport
+        self.threadStore = threadStore
         self.heartbeatDefaults = heartbeatDefaults
         self.installationIdentifier = installationIdentifier
         self.now = now
@@ -167,7 +180,83 @@ actor FeedbackBasketClient {
                 .merging(context) { _, supplied in supplied }
                 .merging(user?.id.map { ["userId": $0] } ?? [:]) { _, supplied in supplied }
         )
-        try await send(path: "api/sdk/feedback", payload: payload)
+        let data = try await send(path: "api/sdk/feedback", payload: payload)
+        guard !data.isEmpty else { return }
+
+        let response: FeedbackSubmissionResponse
+        do {
+            response = try JSONDecoder().decode(FeedbackSubmissionResponse.self, from: data)
+        } catch {
+            throw FeedbackBasketError.invalidResponse
+        }
+        if let accessToken = response.accessToken {
+            let credential = FeedbackThreadCredential(
+                feedbackId: response.id,
+                accessToken: accessToken
+            )
+            try await threadStore.save(credential, for: baseURL)
+        }
+    }
+
+    func loadReplies() async -> FeedbackReplyInbox {
+        guard let credentials = try? await threadStore.load(for: baseURL) else {
+            return .empty
+        }
+
+        var replies: [FeedbackBasketReply] = []
+        var threadsToAcknowledge: [FeedbackThreadCredential] = []
+        for credential in credentials {
+            do {
+                var request = URLRequest(
+                    url: endpoint(
+                        pathComponents: [
+                            "api", "widget", "feedback", credential.feedbackId, "messages",
+                        ]
+                    )
+                )
+                request.httpMethod = "GET"
+                request.setValue(
+                    "Bearer \(credential.accessToken)",
+                    forHTTPHeaderField: "Authorization"
+                )
+                let data = try await perform(request)
+                let response = try JSONDecoder().decode(FeedbackMessagesResponse.self, from: data)
+                let threadReplies = response.messages.compactMap(\.reply)
+                if !threadReplies.isEmpty {
+                    replies.append(contentsOf: threadReplies)
+                    threadsToAcknowledge.append(credential)
+                }
+            } catch {
+                // Reply retrieval must never prevent the feedback form from opening.
+            }
+        }
+
+        return FeedbackReplyInbox(
+            replies: replies.sorted { $0.createdAt < $1.createdAt },
+            threadsToAcknowledge: threadsToAcknowledge
+        )
+    }
+
+    func markRepliesSeen(in threads: [FeedbackThreadCredential]) async {
+        for credential in threads {
+            do {
+                var request = URLRequest(
+                    url: endpoint(
+                        pathComponents: [
+                            "api", "widget", "feedback", credential.feedbackId, "seen",
+                        ]
+                    )
+                )
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(
+                    SeenPayload(token: credential.accessToken)
+                )
+                _ = try await perform(request)
+            } catch {
+                // A later sheet presentation can retry the acknowledgement.
+            }
+        }
     }
 
     func sendHeartbeatIfNeeded() async {
@@ -185,19 +274,24 @@ actor FeedbackBasketClient {
             installationId: installationIdentifier()
         )
         do {
-            try await send(path: "api/sdk/heartbeat", payload: payload)
+            _ = try await send(path: "api/sdk/heartbeat", payload: payload)
             heartbeatDefaults.set(now(), forKey: defaultsKey)
         } catch {
             // Connection verification is retried on the next app launch.
         }
     }
 
-    private func send<Payload: Encodable>(path: String, payload: Payload) async throws {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+    private func send<Payload: Encodable>(path: String, payload: Payload) async throws -> Data {
+        let components = path.split(separator: "/").map(String.init)
+        var request = URLRequest(url: endpoint(pathComponents: components))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(payload)
 
+        return try await perform(request)
+    }
+
+    private func perform(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await transport.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw FeedbackBasketError.invalidResponse
@@ -207,6 +301,13 @@ actor FeedbackBasketClient {
                 throw FeedbackBasketError.invalidResponse
             }
             throw FeedbackBasketError.rejected(apiError.error)
+        }
+        return data
+    }
+
+    private func endpoint(pathComponents: [String]) -> URL {
+        pathComponents.reduce(baseURL) { url, component in
+            url.appendingPathComponent(component)
         }
     }
 }
@@ -228,6 +329,54 @@ private struct HeartbeatPayload: Encodable {
     let appVersion: String?
     let appBuild: String?
     let installationId: String
+}
+
+private struct FeedbackSubmissionResponse: Decodable {
+    let id: String
+    let accessToken: String?
+}
+
+private struct FeedbackMessagesResponse: Decodable {
+    let messages: [FeedbackMessageResponse]
+}
+
+private struct FeedbackMessageResponse: Decodable {
+    let id: String
+    let senderType: String
+    let content: String
+    let sentByName: String?
+    let createdAt: String
+
+    var reply: FeedbackBasketReply? {
+        guard
+            senderType == "OWNER",
+            let date = FeedbackBasketDateParser.date(from: createdAt)
+        else {
+            return nil
+        }
+        return FeedbackBasketReply(
+            id: id,
+            content: content,
+            sentByName: sentByName,
+            createdAt: date
+        )
+    }
+}
+
+private struct SeenPayload: Encodable {
+    let token: String
+}
+
+private enum FeedbackBasketDateParser {
+    static func date(from value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: value)
+    }
 }
 
 private struct APIError: Decodable {

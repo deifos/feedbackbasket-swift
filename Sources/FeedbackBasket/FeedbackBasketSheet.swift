@@ -21,6 +21,9 @@ public struct FeedbackBasketSheet: View {
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var sent = false
+    @State private var replies: [FeedbackBasketReply] = []
+    @State private var threadsToAcknowledge: [FeedbackThreadCredential] = []
+    @State private var isLoadingReplies = true
 
     private let context: [String: String]
 
@@ -50,6 +53,32 @@ public struct FeedbackBasketSheet: View {
                     .accessibilityElement(children: .combine)
                 } else {
                     Form {
+                        if isLoadingReplies || !replies.isEmpty {
+                            Section("Team replies") {
+                                if isLoadingReplies {
+                                    HStack(spacing: 10) {
+                                        ProgressView()
+                                        Text("Checking for replies…")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } else {
+                                    ForEach(replies) { reply in
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            Text(reply.content)
+                                            HStack {
+                                                Text(reply.sentByName ?? "FeedbackBasket team")
+                                                Spacer()
+                                                Text(reply.createdAt, style: .relative)
+                                            }
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        }
+                                        .onAppear { acknowledgeDisplayedReplies() }
+                                    }
+                                }
+                            }
+                        }
+
                         Picker("What is this about?", selection: $category) {
                             ForEach(FeedbackBasketCategory.allCases) { category in
                                 Text(category.label).tag(category)
@@ -87,6 +116,21 @@ public struct FeedbackBasketSheet: View {
                 }
             }
         }
+        .task { await loadReplies() }
+    }
+
+    private func loadReplies() async {
+        let inbox = await FeedbackBasket.loadReplies()
+        replies = inbox.replies
+        threadsToAcknowledge = inbox.threadsToAcknowledge
+        isLoadingReplies = false
+    }
+
+    private func acknowledgeDisplayedReplies() {
+        guard !threadsToAcknowledge.isEmpty else { return }
+        let displayedThreads = threadsToAcknowledge
+        threadsToAcknowledge = []
+        Task { await FeedbackBasket.markRepliesSeen(in: displayedThreads) }
     }
 
     private func send() {

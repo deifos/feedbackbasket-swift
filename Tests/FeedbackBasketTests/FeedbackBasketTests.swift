@@ -89,6 +89,86 @@ final class FeedbackBasketTests: XCTestCase {
         try await client.submit(message: "Hello", category: .question, email: nil, context: [:])
     }
 
+    func testSuccessfulFeedbackStoresReplyCredential() async throws {
+        let store = MockThreadStore()
+        let response = Data(
+            #"{"success":true,"id":"feedback-123","accessToken":"thread-token"}"#.utf8
+        )
+        let client = makeClient(
+            transport: .success(data: response),
+            threadStore: store
+        )
+
+        try await client.submit(message: "Hello", category: nil, email: nil, context: [:])
+
+        let credentials = try await store.load(for: baseURL)
+        XCTAssertEqual(
+            credentials,
+            [FeedbackThreadCredential(feedbackId: "feedback-123", accessToken: "thread-token")]
+        )
+    }
+
+    func testReplyFetchUsesBearerAuthorizationAndDecodesOwnerMessages() async throws {
+        let store = MockThreadStore()
+        try await store.save(
+            FeedbackThreadCredential(feedbackId: "feedback-123", accessToken: "thread-token"),
+            for: baseURL
+        )
+        let response = Data(
+            #"{"messages":[{"id":"message-1","senderType":"OWNER","content":"Thanks — this is fixed.","sentByName":"Vlad","createdAt":"2026-07-13T15:30:00.000Z"}],"lastSeenAt":null}"#.utf8
+        )
+        let transport = MockTransport.success(data: response)
+        let client = makeClient(transport: transport, threadStore: store)
+
+        let inbox = await client.loadReplies()
+
+        let request = try await transport.lastRequest()
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(
+            request.url?.path,
+            "/api/widget/feedback/feedback-123/messages"
+        )
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer thread-token")
+        XCTAssertEqual(inbox.replies.count, 1)
+        XCTAssertEqual(inbox.replies.first?.content, "Thanks — this is fixed.")
+        XCTAssertEqual(inbox.replies.first?.sentByName, "Vlad")
+        XCTAssertEqual(inbox.threadsToAcknowledge.count, 1)
+    }
+
+    func testSeenAcknowledgementPostsTokenInJSONBody() async throws {
+        let transport = MockTransport.success()
+        let client = makeClient(transport: transport)
+        let credential = FeedbackThreadCredential(
+            feedbackId: "feedback-123",
+            accessToken: "thread-token"
+        )
+
+        await client.markRepliesSeen(in: [credential])
+
+        let request = try await transport.lastRequest()
+        let body = try await transport.lastJSON()
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/widget/feedback/feedback-123/seen")
+        XCTAssertNil(request.url?.query)
+        XCTAssertEqual(body["token"] as? String, "thread-token")
+    }
+
+    func testReplyFetchFailureReturnsEmptyInbox() async throws {
+        let store = MockThreadStore()
+        try await store.save(
+            FeedbackThreadCredential(feedbackId: "feedback-123", accessToken: "thread-token"),
+            for: baseURL
+        )
+        let client = makeClient(
+            transport: MockTransport(error: TestError.offline),
+            threadStore: store
+        )
+
+        let inbox = await client.loadReplies()
+
+        XCTAssertEqual(inbox, .empty)
+    }
+
     func testRejectedFeedbackUsesBackendMessage() async throws {
         let transport = MockTransport(statusCode: 422, data: Data(#"{"error":"Project key is invalid."}"#.utf8))
         let client = makeClient(transport: transport)
@@ -175,6 +255,7 @@ final class FeedbackBasketTests: XCTestCase {
 
     private func makeClient(
         transport: MockTransport,
+        threadStore: any FeedbackThreadStore = MockThreadStore(),
         user: FeedbackBasketUser? = nil,
         defaultContext: [String: String] = [:],
         defaults: UserDefaults? = nil,
@@ -187,6 +268,7 @@ final class FeedbackBasketTests: XCTestCase {
             user: user,
             defaultContext: defaultContext,
             transport: transport,
+            threadStore: threadStore,
             heartbeatDefaults: defaults ?? makeDefaults(),
             installationIdentifier: { installationIdentifier },
             now: { now }
@@ -224,8 +306,8 @@ private actor MockTransport: FeedbackBasketTransport {
         self.error = error
     }
 
-    static func success(statusCode: Int = 200) -> MockTransport {
-        MockTransport(statusCode: statusCode)
+    static func success(statusCode: Int = 200, data: Data = Data()) -> MockTransport {
+        MockTransport(statusCode: statusCode, data: data)
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -244,5 +326,22 @@ private actor MockTransport: FeedbackBasketTransport {
         let request = try XCTUnwrap(requests.last)
         let body = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    }
+
+    func lastRequest() throws -> URLRequest {
+        try XCTUnwrap(requests.last)
+    }
+}
+
+private actor MockThreadStore: FeedbackThreadStore {
+    private var storedCredentials: [FeedbackThreadCredential] = []
+
+    func load(for baseURL: URL) throws -> [FeedbackThreadCredential] {
+        storedCredentials
+    }
+
+    func save(_ credential: FeedbackThreadCredential, for baseURL: URL) throws {
+        storedCredentials.removeAll { $0.feedbackId == credential.feedbackId }
+        storedCredentials.append(credential)
     }
 }

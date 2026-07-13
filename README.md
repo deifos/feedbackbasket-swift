@@ -6,6 +6,7 @@ FeedbackBasket dashboard used by your web projects.
 The SDK supports iOS 16 and later and includes:
 
 - A native SwiftUI feedback sheet
+- In-app team replies in the same feedback sheet
 - Programmatic feedback submission
 - Automatic app and device context
 - A lightweight connection heartbeat for dashboard verification
@@ -22,16 +23,15 @@ In Xcode, open **File → Add Package Dependencies** and enter:
 https://github.com/deifos/feedbackbasket-swift.git
 ```
 
-Add the `FeedbackBasket` product to the main iOS application target. Use the
-latest tagged release. Until the first release tag is published, select the
-`main` branch for preview testing.
+Add the `FeedbackBasket` product to the main iOS application target. Use version
+`0.2.0` or later for in-app team replies.
 
 For a Swift package manifest, add:
 
 ```swift
 .package(
     url: "https://github.com/deifos/feedbackbasket-swift.git",
-    from: "0.1.0"
+    from: "0.2.0"
 )
 ```
 
@@ -108,6 +108,19 @@ struct SettingsView: View {
 The standard form includes an optional email field. A configured email is
 prefilled, but the user can clear it to submit without an email address.
 
+## Receive team replies
+
+No additional host-app code is required. After a dashboard user sends an
+in-app reply, the SDK shows it under **Team replies** the next time the native
+feedback sheet opens. Reply checks are non-blocking, so the form still opens
+normally when the device is offline or FeedbackBasket is temporarily
+unavailable.
+
+Each native submission receives a per-thread reply credential. The SDK stores
+that credential in the app Keychain, uses it only in authenticated reply
+requests, and marks replies seen after displaying them. Credentials are never
+placed in URLs or logs.
+
 ## Submit feedback programmatically
 
 ```swift
@@ -142,6 +155,10 @@ Configuration schedules a connection heartbeat. At most once every 24 hours,
 the SDK sends the project key, bundle ID, app version/build, SDK version, and a
 random Keychain-backed installation identifier. The last successful heartbeat
 time is stored in app-only `UserDefaults` to throttle connections.
+
+Per-submission reply credentials are stored in the app Keychain so the native
+sheet can retrieve and acknowledge team replies. They are not shared with the
+host app or stored in `UserDefaults`.
 
 The package bundles `PrivacyInfo.xcprivacy` for its own behavior. Applications
 using the SDK remain responsible for reviewing their privacy policy, App Store
