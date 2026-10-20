@@ -65,7 +65,7 @@ public enum FeedbackBasketError: LocalizedError {
 /// The main entry point for configuring and submitting FeedbackBasket feedback.
 public enum FeedbackBasket {
     /// The current SDK version.
-    public nonisolated static let sdkVersion = "0.3.0"
+    public nonisolated static let sdkVersion = "0.5.0"
 
     private static var client: FeedbackBasketClient?
     private static var foregroundObserver: NSObjectProtocol?

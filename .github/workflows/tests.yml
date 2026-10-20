@@ -1,0 +1,21 @@
+name: iOS SDK tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select an available iPhone simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/simulators.json
+          python3 - <<'PY'
+          import json, os
+          devices = json.load(open('/tmp/simulators.json'))['devices']
+          device = next(d for runtime, items in devices.items() if 'iOS' in runtime for d in items if d['name'].startswith('iPhone'))
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('SIMULATOR_ID=' + device['udid'] + '\n')
+          PY
+      - name: Run package tests on iOS
+        run: xcodebuild test -scheme FeedbackBasket -destination "platform=iOS Simulator,id=$SIMULATOR_ID" CODE_SIGNING_ALLOWED=NO

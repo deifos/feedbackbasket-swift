@@ -1,0 +1,12 @@
+{
+  "contractVersion": "3.10.0",
+  "sdkVersion": "0.5.0",
+  "scope": "public-mobile-visitor",
+  "parityExemption": "swift-public-community",
+  "operations": [
+    "board",
+    "roadmap",
+    "toggleVote",
+    "submit"
+  ]
+}

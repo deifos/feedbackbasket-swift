@@ -240,3 +240,30 @@ xcodebuild \
 ## License
 
 FeedbackBasket Swift SDK is available under the MIT License. See [LICENSE](LICENSE).
+
+## Public boards and roadmaps (0.5.0)
+
+The public community client works without a mobile key or administrator token. It is compatible with agent contract 3.10.0. Enable the board or public roadmap in project settings first.
+
+```swift
+let community = FeedbackBasketCommunity()
+let page = try await community.board(slug: "my-app", page: 1, sort: .votes)
+for item in page.feedback {
+    print(item.fullContent, item.voteCount, item.hasVoted)
+}
+let roadmap = try await community.roadmap(slug: "my-app")
+let submission = try await community.submit(slug: "my-app", content: "Add keyboard shortcuts")
+let vote = try await community.toggleVote(slug: "my-app", feedbackId: page.feedback[0].id)
+```
+
+Use `page.hasMore` and increment the page number to read later pages. Submissions stay private until approved. Votes use the visitor's public IP address, so people on a shared network can share one vote. `toggleVote` is not idempotent: do not automatically retry after an uncertain response. Reload the board to check `hasVoted` first. Check `board.readOnly` before showing submission or vote controls; the server also enforces this rule.
+
+Roadmap cards expose titles, descriptions, statuses, dates, and positions. Date fields are ISO 8601 strings. Use `config.showDueDates` and `config.showScheduledDates` to decide which dates to display. Skip the statuses in `config.hiddenColumns` when you draw columns; their cards are never returned. `config.primaryColor` is the public board's brand color. Internal notes are never returned.
+
+To match the web widget's Feedback + Voting template, load `board(slug:page:sort:)` with `.votes`, show the first five items with `toggleVote`, and offer `submit` for new ideas.
+
+For self-hosting, pass `baseURL` to `FeedbackBasketCommunity`. Do not embed CLI tokens, MCP keys, or administrator credentials in an app. Agents manage settings and move cards through the authenticated CLI/MCP contract; this public SDK intentionally excludes those operations.
+
+### Validation
+
+Run the package tests on an iOS simulator through Xcode. The package imports UIKit and requires the iOS SDK; Windows cannot run this test suite.
