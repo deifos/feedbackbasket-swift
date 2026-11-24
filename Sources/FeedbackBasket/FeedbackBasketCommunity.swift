@@ -2,7 +2,7 @@ import Foundation
 
 /// Public community access. This client never accepts an administrator token.
 public actor FeedbackBasketCommunity {
-    public static let contractVersion = "3.10.0"
+    public static let contractVersion = "3.11.0"
     private let baseURL: URL
     private let transport: any FeedbackBasketTransport
 
@@ -30,17 +30,36 @@ public actor FeedbackBasketCommunity {
 
     /// Toggles the current IP-based vote. Do not retry automatically: a second call removes the vote.
     public func toggleVote(slug: String, feedbackId: String) async throws -> FeedbackBasketVoteResult {
-        try await send(slug: slug, resource: "board", suffix: "vote", body: ["feedbackId": feedbackId])
+        try await send(slug: slug, resource: "board", suffix: "vote", body: VoteBody(feedbackId: feedbackId))
     }
 
     /// Submits feedback for review. It is not immediately published on the board.
-    public func submit(slug: String, content: String, email: String? = nil) async throws -> FeedbackBasketBoardSubmission {
-        var body = ["content": content]
-        if let email { body["email"] = email }
+    ///
+    /// `submitterName` is optional. It appears on the public card only when
+    /// `showNamePublicly` is `true` and the feedback is approved. The email is never public.
+    public func submit(
+        slug: String,
+        content: String,
+        email: String? = nil,
+        submitterName: String? = nil,
+        showNamePublicly: Bool = false
+    ) async throws -> FeedbackBasketBoardSubmission {
+        let name = submitterName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasName = !(name ?? "").isEmpty
+        let body = SubmissionBody(
+            content: content,
+            email: email,
+            submitterName: hasName ? String(name!.prefix(60)) : nil,
+            showNamePublicly: hasName ? showNamePublicly : nil
+        )
         return try await send(slug: slug, resource: "board", suffix: "feedback", body: body)
     }
 
-    private func send<T: Decodable>(slug: String, resource: String, suffix: String? = nil, query: [URLQueryItem] = [], body: [String: String]? = nil) async throws -> T {
+    private func send<T: Decodable>(slug: String, resource: String, suffix: String? = nil, query: [URLQueryItem] = []) async throws -> T {
+        try await send(slug: slug, resource: resource, suffix: suffix, query: query, body: Optional<VoteBody>.none)
+    }
+
+    private func send<T: Decodable, Body: Encodable>(slug: String, resource: String, suffix: String? = nil, query: [URLQueryItem] = [], body: Body?) async throws -> T {
         guard !slug.isEmpty, slug.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil else {
             throw FeedbackBasketError.rejected("Invalid board slug")
         }
@@ -69,6 +88,13 @@ public actor FeedbackBasketCommunity {
 }
 
 private struct CommunityErrorResponse: Decodable { let error: String }
+private struct VoteBody: Encodable { let feedbackId: String }
+private struct SubmissionBody: Encodable {
+    let content: String
+    let email: String?
+    let submitterName: String?
+    let showNamePublicly: Bool?
+}
 public struct FeedbackBasketBoardPage: Decodable, Sendable {
     public let board: FeedbackBasketBoard
     public let feedback: [FeedbackBasketBoardItem]
@@ -88,8 +114,16 @@ public struct FeedbackBasketBoard: Decodable, Sendable {
 }
 public struct FeedbackBasketBoardItem: Decodable, Identifiable, Sendable {
     public let id: String
+    /// Card title. Same as `content`; prefer `title` with contract 3.11.0 servers.
     public let content: String
+    /// Full feedback text.
     public let fullContent: String
+    /// Card title approved by the project owner, or the AI title. Nil on servers before 3.11.0.
+    public let title: String?
+    /// Card description; nil when the title already contains the whole feedback.
+    public let description: String?
+    /// Submitter name, present only when the submitter chose to show it.
+    public let authorName: String?
     public let status: String
     public let category: String?
     /// ISO 8601 timestamp, as returned by the public API.

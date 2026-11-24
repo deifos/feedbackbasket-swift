@@ -68,5 +68,28 @@ final class CommunityTests: XCTestCase {
         XCTAssertTrue(result.success)
         let request = await transport.last()
         XCTAssertEqual(request?.url?.path, "/api/board/ideas/feedback")
+        let body = try XCTUnwrap(request?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["content"] as? String, "Add shortcuts")
+        XCTAssertNil(json["submitterName"])
+        XCTAssertNil(json["showNamePublicly"])
+    }
+    func testSubmissionSendsOptInName() async throws {
+        let transport = CommunityTransport(#"{"success":true,"id":"f3"}"#, status: 201)
+        let client = FeedbackBasketCommunity(baseURL: URL(string: "https://sdk.test")!, transport: transport)
+        _ = try await client.submit(slug: "ideas", content: "Dark mode", submitterName: "  Jim ", showNamePublicly: true)
+        let request = await transport.last()
+        let body = try XCTUnwrap(request?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["submitterName"] as? String, "Jim")
+        XCTAssertEqual(json["showNamePublicly"] as? Bool, true)
+    }
+    func testBoardDecodesPublicCardFields() async throws {
+        let transport = CommunityTransport(#"{"board":{"name":"Ideas","allowAnonymousPosting":true,"readOnly":false},"feedback":[{"id":"f1","title":"More music","content":"More music","fullContent":"Different moods","description":"Different moods","authorName":"Jim","status":"PLANNED","createdAt":"2026-10-19T00:00:00Z","voteCount":13,"hasVoted":false}],"total":1,"page":1,"limit":20}"#)
+        let client = FeedbackBasketCommunity(baseURL: URL(string: "https://sdk.test")!, transport: transport)
+        let item = try await client.board(slug: "ideas").feedback[0]
+        XCTAssertEqual(item.title, "More music")
+        XCTAssertEqual(item.description, "Different moods")
+        XCTAssertEqual(item.authorName, "Jim")
     }
 }

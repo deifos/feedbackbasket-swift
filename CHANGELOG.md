@@ -1,3 +1,9 @@
+# 0.6.0
+
+- Decode public card fields on board items: `title`, `description`, and `authorName`.
+- Add optional `submitterName` and `showNamePublicly` to `submit`. Names are public only after the submitter opts in and the owner approves the feedback.
+- Align with contract 3.11.0; administrator operations remain in the CLI and MCP.
+
 # 0.5.0
 
 - Decode `hiddenColumns` in public roadmap settings. Cards in hidden columns are not returned.

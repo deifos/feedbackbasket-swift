@@ -241,20 +241,27 @@ xcodebuild \
 
 FeedbackBasket Swift SDK is available under the MIT License. See [LICENSE](LICENSE).
 
-## Public boards and roadmaps (0.5.0)
+## Public boards and roadmaps (0.6.0)
 
-The public community client works without a mobile key or administrator token. It is compatible with agent contract 3.10.0. Enable the board or public roadmap in project settings first.
+The public community client works without a mobile key or administrator token. It is compatible with agent contract 3.11.0. Enable the board or public roadmap in project settings first.
 
 ```swift
 let community = FeedbackBasketCommunity()
 let page = try await community.board(slug: "my-app", page: 1, sort: .votes)
 for item in page.feedback {
-    print(item.fullContent, item.voteCount, item.hasVoted)
+    print(item.title ?? item.content, item.description ?? "", item.authorName ?? "", item.voteCount, item.hasVoted)
 }
 let roadmap = try await community.roadmap(slug: "my-app")
-let submission = try await community.submit(slug: "my-app", content: "Add keyboard shortcuts")
+let submission = try await community.submit(
+    slug: "my-app",
+    content: "Add keyboard shortcuts",
+    submitterName: "Jim",
+    showNamePublicly: true
+)
 let vote = try await community.toggleVote(slug: "my-app", feedbackId: page.feedback[0].id)
 ```
+
+Each item has the card `title`, an optional `description`, and `authorName`, which is set only when the submitter chose to show their name. `submitterName` is optional and is shown only when `showNamePublicly` is `true` and the owner approves the feedback; owners can still hide it. Email addresses are never public.
 
 Use `page.hasMore` and increment the page number to read later pages. Submissions stay private until approved. Votes use the visitor's public IP address, so people on a shared network can share one vote. `toggleVote` is not idempotent: do not automatically retry after an uncertain response. Reload the board to check `hasVoted` first. Check `board.readOnly` before showing submission or vote controls; the server also enforces this rule.
 
